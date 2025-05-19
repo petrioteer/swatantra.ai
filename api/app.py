@@ -4,6 +4,15 @@ Main application module for the Gem Voice API.
 This module initializes the Flask application and Gemini client,
 and provides functions to create and manage the application.
 """
+# Import compatibility layer first to ensure asyncio patching happens before anything else
+try:
+    from api.audio.vercel_compat import patch_asyncio_methods
+    # Apply patches
+    patch_asyncio_methods()
+except ImportError:
+    # Not critical if we can't import it, we're likely running locally
+    pass
+
 import os
 import asyncio
 from flask import Flask
