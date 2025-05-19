@@ -4,8 +4,13 @@ google-generativeai>=0.3.0
 google>=3.0.0
 google.genai
 google-api-python-client>=2.0.0
-# pyaudio is commented out as it may cause issues on Vercel serverless environment
-pyaudio>=0.2.13
-# Adding gunicorn for production deployment
+# pyaudio is removed as we're using WebSockets instead
 gunicorn>=20.1.0
 python-dotenv>=0.19.0
+# WebSocket support
+flask-sock>=0.5.2
+websockets>=10.4
+# Audio processing
+pydub>=0.25.1
+# For async support
+asyncio>=3.4.3

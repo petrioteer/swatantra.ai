@@ -2,7 +2,11 @@
 Gemini AI configuration and system instructions.
 """
 from google import genai
-from google.genai import types
+try:
+    from google.genai import types
+    TYPES_AVAILABLE = True
+except ImportError:
+    TYPES_AVAILABLE = False
 
 # Gemini system instructions
 SYSTEM_INSTRUCTION = """
@@ -96,23 +100,71 @@ Adopt and embody the loving vision of Dr. Swatantra Jain: to make natural, holis
 
 def get_live_connect_config(voice_name="Puck"):
     """
-    Create and return a LiveConnectConfig object for Gemini API.
+    Create and return a configuration for Gemini API.
     
     Args:
         voice_name (str): Name of the voice to use for speech synthesis
         
     Returns:
-        types.LiveConnectConfig: Configuration for Gemini API
+        dict: Configuration for Gemini API compatible with the processor
     """
-    return types.LiveConnectConfig(
-        response_modalities=["audio"],
-        speech_config=types.SpeechConfig(
-            voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
-            )
-        ),
-        system_instruction=types.Content(
-            parts=[types.Part.from_text(text=SYSTEM_INSTRUCTION)],
-            role="user"
-        ),
-    )
+    # Check if we have the types module available
+    if TYPES_AVAILABLE:
+        # Use the types module to create LiveConnectConfig
+        live_connect_config = types.LiveConnectConfig(
+            response_modalities=["audio"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
+                )
+            ),
+            system_instruction=types.Content(
+                parts=[types.Part.from_text(text=SYSTEM_INSTRUCTION)],
+                role="user"
+            ),
+        )
+    else:
+        # Fallback to dictionary structure if types not available
+        live_connect_config = {
+            "response_modalities": ["audio"],
+            "speech_config": {
+                "voice_config": {
+                    "prebuilt_voice_config": {"voice_name": voice_name}
+                }
+            },
+            "system_instruction": {
+                "parts": [{"text": SYSTEM_INSTRUCTION}],
+                "role": "user"
+            }
+        }
+
+    # Return a complete config compatible with our processor.py
+    return {
+        "model": "models/gemini-2.0-flash-live-001",
+        "live_connect_config": live_connect_config,
+        "history": [],
+        "generation_config": {
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "top_k": 40,
+            "max_output_tokens": 8192
+        },
+        "safety_settings": [
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT", 
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            }
+        ]
+    }

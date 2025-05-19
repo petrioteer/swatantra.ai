@@ -1,21 +1,37 @@
 """
-Audio processor for handling streaming audio to and from Gemini API.
+Audio processing module for the Gem Voice API.
+
+This module provides classes and functions for processing audio data
+and communicating with the Gemini API.
 """
 import asyncio
+import time
+import base64
 import traceback
 import concurrent.futures
 from logging import getLogger
 import os
+import json
+from typing import Dict, Any, Optional, Set, List
 
-# Conditionally import PyAudio - it won't be available in Vercel's serverless environment
+# WebSockets imports instead of PyAudio
+import websockets
+from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
+
+# Proper Gemini API imports
+from google import genai
 try:
-    import pyaudio
-    PYAUDIO_AVAILABLE = True
-    # Create a global PyAudio instance to be shared
-    pya = pyaudio.PyAudio()
+    from google.genai import types
+    GEMINI_TYPES_AVAILABLE = True
 except ImportError:
-    PYAUDIO_AVAILABLE = False
-    pya = None
+    GEMINI_TYPES_AVAILABLE = False
+
+# We no longer use PyAudio - WebSockets will handle the audio streaming
+WEBSOCKET_AVAILABLE = True
+try:
+    import websockets
+except ImportError:
+    WEBSOCKET_AVAILABLE = False
 
 from api.config.settings import (
     FORMAT, CHANNELS, SEND_SAMPLE_RATE, RECEIVE_SAMPLE_RATE, 
@@ -35,81 +51,80 @@ async def run_in_thread(func, *args, **kwargs):
 
 class AudioLoop:
     """
-    Handles bidirectional audio streaming between user and Gemini API.
+    Handles real-time audio streaming with the Gemini API.
+    
+    This class manages sending audio data to the Gemini API and 
+    receiving responses, handling the two-way communication.
     """
+    
     def __init__(self, client):
         """
-        Initialize the AudioLoop with the Gemini client.
+        Initialize the AudioLoop with a Gemini client.
         
         Args:
-            client: Initialized Gemini API client
+            client: The Gemini API client
         """
         self.client = client
-        self.audio_in_queue = None
-        self.out_queue = None
         self.session = None
-        self._session_ctx = None
-        self.running = True
-        self.paused = False
-        self.audio_stream = None
-        self._stop_event = asyncio.Event()
-        self._pause_event = asyncio.Event()
-        self._loop = None
-        self.retry_count = 0
-        # Use the global PyAudio instance if available
-        self.pya = pya
+        self.is_running = False
+        self.audio_in_queue = asyncio.Queue()
+        self.out_queue = asyncio.Queue()
+        self._processing_task = None
         
         # Check if we're running in a serverless environment
         self.is_serverless = os.environ.get('VERCEL') == '1'
 
-    async def connect_with_retry(self, config):
+    async def connect_with_retry(self, config: Dict[str, Any], max_retries: int = 3) -> bool:
         """
-        Establish connection to Gemini API with retry mechanism.
+        Attempt to connect to the Gemini API with retries.
         
         Args:
-            config: Gemini API configuration object
+            config: Configuration for the Gemini API session
+            max_retries: Maximum number of connection attempts
             
-        Raises:
-            Exception: If connection fails after maximum retries
+        Returns:
+            bool: True if connection was successful, False otherwise
         """
-        while self.retry_count < MAX_RETRIES:
+        retry_count = 0
+        
+        while retry_count < max_retries:
             try:
+                logger.info(f"Connecting to Gemini API (attempt {retry_count + 1})")
+                
+                # Use the live.connect approach from gem-voice.py
                 # Store the context manager
-                self._session_ctx = self.client.aio.live.connect(model=MODEL, config=config)
+                self._session_ctx = self.client.aio.live.connect(
+                    model=config["model"],
+                    config=config["live_connect_config"]
+                )
+                
                 # Enter the context
                 self.session = await self._session_ctx.__aenter__()
-                logger.info("Successfully created Gemini API session")
-                return
+                self.is_running = True
+                
+                logger.info("Successfully connected to Gemini API")
+                return True
+                
             except Exception as e:
-                self.retry_count += 1
-                logger.error(f"Connection attempt {self.retry_count} failed: {str(e)}")
-                if self.retry_count < MAX_RETRIES:
-                    await asyncio.sleep(RETRY_DELAY)
-                else:
-                    logger.error("Max retries reached, giving up")
-                    raise
-
+                logger.error(f"Connection attempt {retry_count + 1} failed: {str(e)}")
+                retry_count += 1
+                await asyncio.sleep(1)  # Wait before retrying
+        
+        logger.error("Failed to connect to Gemini API after maximum retries")
+        return False
+    
     async def stop(self):
         """Stop all audio processing and close connections."""
         logger.info("Stopping audio processing")
-        self.running = False
-        self._stop_event.set()
+        self.is_running = False
         
         # Give tasks time to notice the running flag change
         await asyncio.sleep(0.5)
         
-        if self.audio_stream and PYAUDIO_AVAILABLE and not self.is_serverless:
-            try:
-                self.audio_stream.stop_stream()
-                self.audio_stream.close()
-                self.audio_stream = None
-                logger.info("Audio stream closed successfully")
-            except Exception as e:
-                logger.error(f"Error stopping audio stream: {str(e)}")
-
-        if self._session_ctx and self.session:
+        if hasattr(self, '_session_ctx') and self._session_ctx and self.session:
             try:
                 logger.info("Closing Gemini API session")
+                # Use the context manager exit method to properly close the session
                 await self._session_ctx.__aexit__(None, None, None)
                 logger.info("Gemini API session closed successfully")
             except Exception as e:
@@ -131,107 +146,88 @@ class AudioLoop:
                     except:
                         pass
 
-    # Rest of the AudioLoop class methods...
-    async def listen_audio(self):
-        """Capture audio from microphone and send to the output queue."""
-        # Skip audio capture in serverless environments
-        if self.is_serverless or not PYAUDIO_AVAILABLE:
-            logger.info("Audio capture not available in serverless environment")
-            return
-            
+    async def send_realtime(self):
+        """
+        Send audio data from the out_queue to the Gemini API in real-time.
+        """
         try:
-            mic_info = self.pya.get_default_input_device_info()
-            self.audio_stream = await run_in_thread(
-                self.pya.open,
-                format=FORMAT,
-                channels=CHANNELS,
-                rate=SEND_SAMPLE_RATE,
-                input=True,
-                input_device_index=mic_info["index"],
-                frames_per_buffer=CHUNK_SIZE,
-            )
+            if not self.session or not self.is_running:
+                raise ValueError("Session not initialized or not running")
             
-            kwargs = {"exception_on_overflow": False} if __debug__ else {}
-            
-            while self.running:
-                try:
-                    data = await run_in_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
-                    await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.error(f"Error reading audio: {str(e)}")
-                    break
+            while self.is_running:
+                if not self.out_queue.empty():
+                    content = await self.out_queue.get()
+                    
+                    if content:
+                        # Send the audio content to the Gemini API using the proper method
+                        await self.session.send(input=content)
+                
+                await asyncio.sleep(0.01)  # Small sleep to prevent CPU hogging
+                
         except Exception as e:
-            logger.error(f"Error in listen_audio: {str(e)}")
-        finally:
-            if self.audio_stream:
-                self.audio_stream.close()
+            logger.error(f"Error in send_realtime: {str(e)}")
+            self.is_running = False
 
     async def receive_audio(self):
-        """Receive audio response from Gemini API and queue it for playback."""
-        while self.running and self.session:
-            try:
-                turn = self.session.receive()
-                async for response in turn:
-                    if data := response.data:
-                        await self.audio_in_queue.put(data)
-            except asyncio.CancelledError:
-                logger.info("Receive audio operation cancelled")
-                break
-            except Exception as e:
-                logger.error(f"Error in receive_audio: {str(e)}")
-                if "timeout" in str(e).lower():
-                    await asyncio.sleep(1)  # Brief pause before retry
-                    continue
-                break
+        """
+        Receive audio responses from the Gemini API and put them in the audio_in_queue.
+        """
+        try:
+            if not self.session or not self.is_running:
+                raise ValueError("Session not initialized or not running")
+            
+            # Continuously receive responses while the loop is running
+            while self.is_running:
+                try:
+                    # Use the turn-based approach from gem-voice.py
+                    turn = self.session.receive()
+                    async for response in turn:
+                        if data := response.data:
+                            await self.audio_in_queue.put(data)
+                except asyncio.CancelledError:
+                    logger.info("Receive audio operation cancelled")
+                    break
+                except Exception as e:
+                    logger.error(f"Error receiving audio response: {str(e)}")
+                    if "timeout" in str(e).lower():
+                        await asyncio.sleep(1)  # Brief pause before retry
+                        continue
+                    break
+                
+                await asyncio.sleep(0.01)  # Small sleep to prevent CPU hogging
+                
+        except Exception as e:
+            logger.error(f"Error in receive_audio: {str(e)}")
+            self.is_running = False
 
-    async def play_audio(self):
-        """Play received audio through audio output device."""
-        # Skip audio playback in serverless environments
-        if self.is_serverless or not PYAUDIO_AVAILABLE:
-            logger.info("Audio playback not available in serverless environment")
+    async def listen_audio(self):
+        """
+        Process audio input from WebSocket clients.
+        
+        Note: We don't need to actively listen here anymore since we're getting
+        audio data from the Flask-Sock WebSocket connections in routes.py.
+        This method now just exists for compatibility with the run method.
+        """
+        # In serverless mode or without WebSockets, just return
+        if self.is_serverless or not WEBSOCKET_AVAILABLE:
+            logger.info("Audio capture handled via WebSocket connections in routes.py")
             return
             
         try:
-            stream = await run_in_thread(
-                self.pya.open,
-                format=FORMAT,
-                channels=CHANNELS,
-                rate=RECEIVE_SAMPLE_RATE,
-                output=True,
-            )
-            while self.running:
-                try:
-                    bytestream = await self.audio_in_queue.get()
-                    await run_in_thread(stream.write, bytestream)
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.error(f"Error playing audio: {str(e)}")
-        finally:
-            if 'stream' in locals():
-                stream.close()
-
-    async def send_realtime(self):
-        """Send audio data from the output queue to the Gemini API."""
-        while self.running and self.session:
-            try:
-                msg = await self.out_queue.get()
-                await self.session.send(input=msg)
-            except asyncio.CancelledError:
-                logger.info("Send realtime operation cancelled")
-                break
-            except Exception as e:
-                logger.error(f"Error in send_realtime: {str(e)}")
-                if "timeout" in str(e).lower():
-                    await asyncio.sleep(1)  # Brief pause before retry
-                    continue
-                break
+            # Keep the method running while the audio loop is active
+            while self.is_running:
+                # Audio data is now being passed to self.out_queue directly by the routes.py WebSocket handler
+                await asyncio.sleep(0.5)  # Just sleep to keep the task alive
+                
+        except asyncio.CancelledError:
+            logger.info("Listen audio task cancelled")
+        except Exception as e:
+            logger.error(f"Error in listen_audio: {str(e)}")
+            # Don't stop the whole loop for errors here
 
     async def send_text(self):
         """Send text input from console to Gemini API."""
-        while self.running:
+        while self.is_running:
             try:
                 text = await run_in_thread(input, "message > ")
                 if text.lower() == "q":
@@ -252,15 +248,6 @@ class AudioLoop:
         self.paused = True
         self._pause_event.set()
         
-        # Pause the audio stream but don't close it
-        if self.audio_stream and not self.audio_stream.is_stopped():
-            try:
-                self.audio_stream.stop_stream()
-                logger.info("Audio stream paused successfully")
-            except Exception as e:
-                logger.error(f"Error pausing audio stream: {str(e)}")
-                # Don't propagate the error, as we want to continue with pause operation
-            
         return True
         
     async def resume(self):
@@ -268,45 +255,72 @@ class AudioLoop:
         logger.info("Resuming audio processing")
         self.paused = False
         self._pause_event.clear()
-        
+
+    async def play_audio(self):
+        """
+        Stream audio responses from the audio_in_queue to connected WebSocket clients.
+        This replaces the previous PyAudio playback with WebSocket streaming.
+        """
         try:
-            # Check if audio stream needs to be recreated
-            if self.audio_stream is None or not hasattr(self.audio_stream, 'is_active'):
-                logger.info("Creating new audio stream")
-                mic_info = self.pya.get_default_input_device_info()
-                self.audio_stream = await run_in_thread(
-                    self.pya.open,
-                    format=FORMAT,
-                    channels=CHANNELS,
-                    rate=SEND_SAMPLE_RATE,
-                    input=True,
-                    input_device_index=mic_info["index"],
-                    frames_per_buffer=CHUNK_SIZE,
-                )
-            # Otherwise resume the existing stream if it's stopped
-            elif self.audio_stream.is_stopped():
-                try:
-                    self.audio_stream.start_stream()
-                    logger.info("Audio stream resumed successfully")
-                except Exception as e:
-                    logger.error(f"Error resuming audio stream: {str(e)}")
-                    # If resuming fails, create a new stream
-                    logger.info("Recreating audio stream after resume failure")
-                    mic_info = self.pya.get_default_input_device_info()
-                    self.audio_stream = await run_in_thread(
-                        self.pya.open,
-                        format=FORMAT,
-                        channels=CHANNELS,
-                        rate=SEND_SAMPLE_RATE,
-                        input=True,
-                        input_device_index=mic_info["index"],
-                        frames_per_buffer=CHUNK_SIZE,
-                    )
-        except Exception as e:
-            logger.error(f"Error during resume: {str(e)}")
-            raise
+            if not WEBSOCKET_AVAILABLE:
+                logger.info("WebSockets not available for audio playback")
+                return
+
+            logger.info("Starting audio playback via WebSockets")
             
-        return True
+            # Get access to active WebSocket clients from the routes module
+            from api.api.routes import ws_clients
+            
+            while self.is_running:
+                if not self.audio_in_queue.empty():
+                    audio_data = await self.audio_in_queue.get()
+                    
+                    if audio_data and ws_clients:
+                        try:
+                            # Add WAV header to the raw audio data to make it decodable by Web Audio API
+                            # This is needed because the Web Audio API expects a valid audio file format
+                            sample_rate = RECEIVE_SAMPLE_RATE  # 24000 Hz as defined in settings
+                            channels = 1  # Mono
+                            sample_width = 2  # 16-bit audio
+                            
+                            # Create WAV header
+                            wav_header = create_wav_header(
+                                len(audio_data), 
+                                sample_rate=sample_rate,
+                                channels=channels, 
+                                sample_width=sample_width
+                            )
+                            
+                            # Combine header with audio data
+                            wav_data = wav_header + audio_data
+                            
+                            # Send the audio data to all connected clients in Base64 format
+                            encoded_audio = base64.b64encode(wav_data).decode('utf-8')
+                            message = json.dumps({
+                                "type": "audio",
+                                "format": "audio/wav",
+                                "data": encoded_audio
+                            })
+                            
+                            # Create a list to track disconnected clients
+                            disconnected = []
+                            
+                            # Send to all connected clients
+                            for ws in list(ws_clients):
+                                try:
+                                    ws.send(message)
+                                except Exception as e:
+                                    logger.error(f"Error sending audio to client: {str(e)}")
+                                    disconnected.append(ws)
+                        
+                        except Exception as e:
+                            logger.error(f"Error preparing audio data for clients: {str(e)}")
+                
+                await asyncio.sleep(0.01)  # Small sleep to prevent CPU hogging
+                
+        except Exception as e:
+            logger.error(f"Error in play_audio: {str(e)}")
+            logger.error(traceback.format_exc())
 
     async def run(self, config):
         """
@@ -316,15 +330,13 @@ class AudioLoop:
             config: Gemini API configuration object
         """
         self._loop = asyncio.get_event_loop()
+        self._stop_event = asyncio.Event()  # Create the stop event
+        
         try:
             await self.connect_with_retry(config)
             if not self.session:
                 raise Exception("Failed to establish session")
 
-            # Create queues
-            self.audio_in_queue = asyncio.Queue()
-            self.out_queue = asyncio.Queue(maxsize=5)
-            
             # Create and gather tasks instead of using TaskGroup (Python 3.11+ feature)
             tasks = [
                 asyncio.create_task(self.send_realtime()),
@@ -350,5 +362,50 @@ class AudioLoop:
             logger.error(f"Error in run: {str(e)}")
             logger.error(traceback.format_exc())
         finally:
-            self.running = False
+            self.is_running = False
             await self.stop()
+
+# Helper function to create a WAV header
+def create_wav_header(data_length, sample_rate=24000, channels=1, sample_width=2):
+    """
+    Create a WAV header for raw audio data.
+    
+    Args:
+        data_length (int): Length of the audio data in bytes
+        sample_rate (int): Sample rate of the audio in Hz
+        channels (int): Number of audio channels (1 for mono, 2 for stereo)
+        sample_width (int): Sample width in bytes (2 for 16-bit audio)
+        
+    Returns:
+        bytes: WAV header data
+    """
+    # RIFF header
+    header = bytearray()
+    header.extend(b'RIFF')
+    header.extend((data_length + 36).to_bytes(4, 'little'))  # 36 + data_length
+    header.extend(b'WAVE')
+    
+    # fmt chunk
+    header.extend(b'fmt ')
+    header.extend((16).to_bytes(4, 'little'))  # Chunk size: 16 for PCM
+    header.extend((1).to_bytes(2, 'little'))   # Audio format: 1 for PCM
+    header.extend(channels.to_bytes(2, 'little'))  # Channels
+    header.extend(sample_rate.to_bytes(4, 'little'))  # Sample rate
+    
+    # Byte rate: SampleRate * NumChannels * BitsPerSample/8
+    byte_rate = sample_rate * channels * sample_width
+    header.extend(byte_rate.to_bytes(4, 'little'))
+    
+    # Block align: NumChannels * BitsPerSample/8
+    block_align = channels * sample_width
+    header.extend(block_align.to_bytes(2, 'little'))
+    
+    # Bits per sample
+    bits_per_sample = sample_width * 8
+    header.extend(bits_per_sample.to_bytes(2, 'little'))
+    
+    # Data chunk
+    header.extend(b'data')
+    header.extend(data_length.to_bytes(4, 'little'))
+    
+    return header

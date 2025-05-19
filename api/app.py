@@ -5,6 +5,7 @@ This module initializes the Flask application and Gemini client,
 and provides functions to create and manage the application.
 """
 import os
+import asyncio
 from flask import Flask
 from flask_cors import CORS
 from google import genai  # Fixed import to match working implementation
@@ -47,7 +48,7 @@ def create_app():
     Create and configure the Flask application.
     
     Returns:
-        Flask: Configured Flask application
+        Flask: Configured Flask application with WebSocket support
     """
     # Create Flask app
     app = Flask(__name__)
@@ -58,7 +59,7 @@ def create_app():
     # Store the Gemini configuration in app config
     app.config['GEMINI_CONFIG'] = get_live_connect_config()
     
-    # Register routes
+    # Register routes (which will also initialize Flask-Sock)
     register_routes(app)
     
     return app
