@@ -1,0 +1,8 @@
+flask>=2.0.0
+flask-cors>=3.0.10
+google-generativeai>=0.3.0
+# pyaudio is commented out as it may cause issues on Vercel serverless environment
+# pyaudio>=0.2.13
+# Adding gunicorn for production deployment
+gunicorn>=20.1.0
+python-dotenv>=0.19.0
