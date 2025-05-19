@@ -97,13 +97,24 @@ HOME_PAGE_TEMPLATE = """
     <style>
         body {
             font-family: 'Arial', sans-serif;
-            max-width: 800px;
+            max-width: 900px;
             margin: 0 auto;
             padding: 20px;
             line-height: 1.6;
+            color: #333;
         }
         h1 {
             color: #4f46e5;
+            border-bottom: 2px solid #4f46e5;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #0ea5e9;
+            margin-top: 30px;
+        }
+        h3 {
+            color: #6366f1;
+            margin-top: 25px;
         }
         .endpoint {
             background: #f0f9ff;
@@ -125,49 +136,266 @@ HOME_PAGE_TEMPLATE = """
             padding: 1rem;
             border-radius: 4px;
             overflow: auto;
+            max-height: 400px;
+            font-size: 14px;
         }
-        .note {
-            background-color: #fffbeb;
-            border-left: 6px solid #f59e0b;
-            padding: 1rem;
-            margin: 1rem 0;
-            border-radius: 4px;
+        code {
+            font-family: 'Consolas', 'Monaco', monospace;
+            background: #f1f5f9;
+            padding: 2px 4px;
+            border-radius: 3px;
+            color: #3b82f6;
+        }
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid #e2e8f0;
+            margin-top: 15px;
+        }
+        .tab {
+            padding: 8px 16px;
+            cursor: pointer;
+            background: #f1f5f9;
+            border: 1px solid #e2e8f0;
+            border-bottom: none;
+            border-radius: 4px 4px 0 0;
+            margin-right: 4px;
+        }
+        .tab.active {
+            background: #fff;
+            font-weight: bold;
+            border-bottom: 1px solid #fff;
+            margin-bottom: -1px;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        footer {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #e2e8f0;
+            text-align: center;
+            font-size: 0.9em;
+            color: #64748b;
         }
     </style>
 </head>
 <body>
     <h1>Dr. Swatantra AI Voice API</h1>
-    <p>Conversational AI interface powered by Gemini</p>
+    <p>A conversational AI interface powered by Google Gemini, offering real-time voice interactions through WebSockets.</p>
+    
+    <h2>Overview</h2>
+    <p>This API allows you to interact with Dr. Swatantra AI, a conversational assistant designed to provide holistic well-being guidance through voice interactions. The API uses WebSockets to establish real-time bidirectional audio communication with the Gemini AI model.</p>
     
     <h2>API Endpoints</h2>
     
     <div class="endpoint">
         <span class="method">POST</span> <code>{{ base_url }}/start_voice</code>
-        <p>Initiates a new voice session with the AI.</p>
-        <pre>{"status": "started", "websocket": {"url": "ws://...", "protocol": "audio-stream"}}</pre>
+        <p>Initiates a new voice session with the AI and returns WebSocket connection details.</p>
+        <h3>Response:</h3>
+        <pre>{
+  "status": "started",
+  "websocket": {
+    "url": "wss://swatantra-ai.onrender.com/audio-stream",
+    "protocol": "audio-stream"
+  }
+}</pre>
     </div>
     
     <div class="endpoint">
         <span class="method">POST</span> <code>{{ base_url }}/terminate_voice</code>
-        <p>Terminates an active voice session.</p>
-        <pre>{"status": "terminated"}</pre>
+        <p>Terminates an active voice session and cleans up all resources.</p>
+        <h3>Response:</h3>
+        <pre>{
+  "status": "terminated"
+}</pre>
     </div>
     
     <div class="endpoint">
         <span class="method">GET</span> <code>{{ base_url }}/status</code>
-        <p>Get the current API status.</p>
-        <pre>{"status": "ok", "version": "1.0.0"}</pre>
+        <p>Gets the current API status and version information.</p>
+        <h3>Response:</h3>
+        <pre>{
+  "status": "ok",
+  "vercel": false,
+  "version": "1.0.0"
+}</pre>
+    </div>
+
+    <h2>Using the API</h2>
+    <p>The typical workflow for using this API is:</p>
+    <ol>
+        <li>Call <code>/start_voice</code> to initiate a session</li>
+        <li>Connect to the returned WebSocket URL</li>
+        <li>Send audio data via the WebSocket and receive audio responses</li>
+        <li>Call <code>/terminate_voice</code> when done to clean up resources</li>
+    </ol>
+
+    <h2>Audio Specifications</h2>
+    <p>The API expects the following audio specifications for optimal performance:</p>
+    <ul>
+        <li><strong>Format:</strong> 16-bit PCM</li>
+        <li><strong>Channels:</strong> 1 (Mono)</li>
+        <li><strong>Sample Rate:</strong> 16000 Hz (sending), 24000 Hz (receiving)</li>
+        <li><strong>Encoding:</strong> Base64 for WebSocket transmission</li>
+    </ul>
+
+    <h2>Code Examples</h2>
+    
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab(event, 'js')">JavaScript</div>
+        <div class="tab" onclick="switchTab(event, 'python')">Python</div>
+        <div class="tab" onclick="switchTab(event, 'curl')">cURL</div>
     </div>
     
-    <div class="note">
-        <h3>Serverless Limitations</h3>
-        <p>When deployed to serverless environments like Vercel, WebSocket functionality is limited due to the 10-second execution timeout.</p>
-        <p>For production use with continuous voice interaction, please deploy to a platform that supports persistent connections.</p>
+    <div id="js" class="tab-content active">
+        <h3>JavaScript Example</h3>
+        <pre>// API endpoint
+const API_URL = 'https://swatantra-ai.onrender.com';
+let websocket = null;
+
+// Step 1: Start a voice session
+async function startSession() {
+  const response = await fetch(`${API_URL}/start_voice`, {
+    method: 'POST'
+  });
+  const data = await response.json();
+  
+  // Step 2: Connect to the WebSocket with the returned URL
+  websocket = new WebSocket(data.websocket.url);
+  
+  // Step 3: Set up WebSocket event handlers
+  websocket.onopen = () => {
+    console.log('Connected to Dr. Swatantra AI');
+    // Get microphone access and start sending audio
+    startMicrophone();
+  };
+  
+  websocket.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === 'audio') {
+      // Play the received audio
+      playAudio(message.data);
+    }
+  };
+}
+
+// Step 4: End the session when done
+async function endSession() {
+  if (websocket) websocket.close();
+  
+  await fetch(`${API_URL}/terminate_voice`, {
+    method: 'POST'
+  });
+  console.log('Session ended');
+}</pre>
     </div>
+    
+    <div id="python" class="tab-content">
+        <h3>Python Example</h3>
+        <pre>import requests
+import websocket
+import json
+import base64
+
+# API endpoint
+API_URL = "https://swatantra-ai.onrender.com"
+
+# Step 1: Start a voice session
+def start_session():
+    response = requests.post(f"{API_URL}/start_voice")
+    data = response.json()
+    ws_url = data["websocket"]["url"]
+    
+    # Step 2: Connect to WebSocket
+    ws = websocket.create_connection(ws_url)
+    print("Connected to Dr. Swatantra AI")
+    return ws
+
+# Step 3: Send audio data
+def send_audio(ws, audio_data):
+    # Convert audio data to base64
+    encoded = base64.b64encode(audio_data).decode('utf-8')
+    
+    # Send to WebSocket
+    ws.send(json.dumps({
+        "type": "audio",
+        "format": "audio/pcm",
+        "data": encoded
+    }))
+
+# Step 4: Receive and process responses
+def receive_response(ws):
+    response = ws.recv()
+    data = json.loads(response)
+    if data.get("type") == "audio":
+        # Process audio response
+        audio_bytes = base64.b64decode(data["data"])
+        # Play the audio...
+        return audio_bytes
+    return None
+
+# Step 5: End the session
+def end_session(ws):
+    ws.close()
+    requests.post(f"{API_URL}/terminate_voice")
+    print("Session ended")</pre>
+    </div>
+    
+    <div id="curl" class="tab-content">
+        <h3>cURL Examples</h3>
+        <pre># Check API status
+curl -X GET https://swatantra-ai.onrender.com/status
+
+# Start a voice session
+curl -X POST https://swatantra-ai.onrender.com/start_voice
+
+# Terminate a voice session
+curl -X POST https://swatantra-ai.onrender.com/terminate_voice</pre>
+        <p>Note: cURL can only be used for the HTTP endpoints, not for the WebSocket connections which require a WebSocket client.</p>
+    </div>
+    
+    <h2>Error Handling</h2>
+    <p>The API uses standard HTTP status codes for errors:</p>
+    <ul>
+        <li><strong>200 OK:</strong> The request succeeded</li>
+        <li><strong>400 Bad Request:</strong> Missing or invalid parameters</li>
+        <li><strong>401 Unauthorized:</strong> Authentication failed or required</li>
+        <li><strong>500 Internal Server Error:</strong> Server-side error</li>
+    </ul>
+
+    <h2>Rate Limits</h2>
+    <p>The API has the following rate limits:</p>
+    <ul>
+        <li>Maximum of 30 requests per minute per client</li>
+        <li>Maximum of 5 concurrent voice sessions per API key</li>
+    </ul>
     
     <footer>
         <p>Made with ❤️ by petrioteer</p>
     </footer>
+    
+    <script>
+        function switchTab(event, tabId) {
+            // Hide all tab content
+            const tabContents = document.getElementsByClassName('tab-content');
+            for (let i = 0; i < tabContents.length; i++) {
+                tabContents[i].classList.remove('active');
+            }
+            
+            // Remove active class from all tabs
+            const tabs = document.getElementsByClassName('tab');
+            for (let i = 0; i < tabs.length; i++) {
+                tabs[i].classList.remove('active');
+            }
+            
+            // Show the selected tab content and mark the tab as active
+            document.getElementById(tabId).classList.add('active');
+            event.currentTarget.classList.add('active');
+        }
+    </script>
 </body>
 </html>
 """
@@ -466,7 +694,7 @@ class AudioLoop:
                             wav_data = wav_header + audio_data
                             
                             # Send the audio data to all connected clients
-                            encoded_audio = base64.b64encode(wav_data).decode('utf-8')
+                            encoded_audio = base64.b64encode(wav_data).decode('utf-8');
                             message = json.dumps({
                                 "type": "audio",
                                 "format": "audio/wav",
