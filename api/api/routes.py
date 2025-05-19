@@ -3,7 +3,6 @@ API routes for the Gem Voice API.
 
 This module defines the Flask routes for interacting with the Gemini AI voice service.
 """
-import asyncio
 import time
 import json
 import base64
@@ -11,9 +10,16 @@ from threading import Thread, Lock
 from flask import jsonify, render_template_string, request, current_app
 from logging import getLogger
 import os
+import sys
 
-# Import the WebSocket handler
-from flask_sock import Sock
+# Check if we're running in a patched Vercel environment
+IN_VERCEL = 'VERCEL_ASYNCIO_PATCHED' in os.environ
+
+# Only import asyncio-dependent modules if not in Vercel
+if not IN_VERCEL:
+    import asyncio
+    # Import the WebSocket handler
+    from flask_sock import Sock
 
 # Get logger
 logger = getLogger(__name__)
@@ -403,25 +409,27 @@ print(response.json())</code></pre>
 """
 
 # Helper function to run async functions in the correct event loop
-def run_async_task(coro_func, *args, **kwargs):
-    """
-    Run an async function in a new event loop safely.
-    
-    Args:
-        coro_func: Coroutine function to run
-        *args: Arguments to pass to the coroutine function
-        **kwargs: Keyword arguments to pass to the coroutine function
+# This is only used when not in Vercel
+if not IN_VERCEL:
+    def run_async_task(coro_func, *args, **kwargs):
+        """
+        Run an async function in a new event loop safely.
         
-    Returns:
-        Result of the coroutine function
-    """
-    try:
-        # Create a new event loop for this task
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro_func(*args, **kwargs))
-    finally:
-        loop.close()
+        Args:
+            coro_func: Coroutine function to run
+            *args: Arguments to pass to the coroutine function
+            **kwargs: Keyword arguments to pass to the coroutine function
+            
+        Returns:
+            Result of the coroutine function
+        """
+        try:
+            # Create a new event loop for this task
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coro_func(*args, **kwargs))
+        finally:
+            loop.close()
 
 def register_routes(app):
     """
@@ -430,8 +438,87 @@ def register_routes(app):
     Args:
         app: Flask application instance
     """
-    # Initialize Flask-Sock for WebSocket support
-    sock = Sock(app)
+    # Initialize Flask-Sock for WebSocket support if not in Vercel
+    if not IN_VERCEL:
+        sock = Sock(app)
+        
+        @sock.route('/audio-stream')
+        def audio_stream_socket(ws):
+            """WebSocket handler for audio streaming."""
+            global audio_loop
+            global ws_clients
+            
+            logger.info("New WebSocket client connected for audio streaming")
+            
+            # Add the WebSocket to our clients set
+            ws_clients.add(ws)
+            
+            try:
+                # Check if we have an active audio loop
+                if not audio_loop or not audio_loop.is_running:
+                    logger.warning("Client connected but no active audio session. Starting one.")
+                    
+                    # Start an audio session if none exists
+                    if not audio_loop:
+                        from api.app import create_audio_loop
+                        audio_loop = create_audio_loop()
+                        
+                        # Start the audio loop in a new thread
+                        audio_thread = Thread(
+                            target=lambda: run_async_task(audio_loop.run, current_app.config['GEMINI_CONFIG']),
+                            daemon=True
+                        )
+                        audio_thread.start()
+                
+                # Process WebSocket messages as long as the connection is open
+                while True:
+                    # Wait for a message from the client
+                    message = ws.receive()
+                    
+                    # Process received message
+                    if message:
+                        try:
+                            # Try to parse as JSON first
+                            data = json.loads(message)
+                            
+                            # Handle different message types
+                            if data.get("type") == "audio":
+                                # Decode base64 audio data
+                                audio_bytes = base64.b64decode(data["data"])
+                                
+                                # If the audio loop is running, send the audio data to it
+                                if audio_loop and audio_loop.is_running:
+                                    # Put this in the out_queue to be processed by the audio loop
+                                    asyncio.run(audio_loop.out_queue.put({
+                                        "data": audio_bytes,
+                                        "mime_type": data.get("format", "audio/pcm")
+                                    }))
+                            
+                            elif data.get("type") == "control":
+                                # Handle control messages (start, stop, etc.)
+                                if data.get("command") == "stop":
+                                    logger.info("Client requested audio session stop")
+                                    if audio_loop:
+                                        asyncio.run(audio_loop.stop())
+                                elif data.get("command") == "start":
+                                    logger.info("Client requested audio session start")
+                                    # Audio session is started when the WebSocket is connected
+                                    
+                        except json.JSONDecodeError:
+                            # If not JSON, treat as raw audio data
+                            if audio_loop and audio_loop.is_running:
+                                asyncio.run(audio_loop.out_queue.put({
+                                    "data": message,
+                                    "mime_type": "audio/pcm"  # Assume default format
+                                }))
+                    
+            except Exception as e:
+                logger.error(f"WebSocket error: {str(e)}")
+            finally:
+                # Remove the WebSocket from the clients set when the connection closes
+                if ws in ws_clients:
+                    ws_clients.remove(ws)
+                logger.info("WebSocket client disconnected")
     
     @app.route('/')
     def home():
@@ -451,98 +538,19 @@ def register_routes(app):
             base_url=base_url
         )
     
-    @sock.route('/audio-stream')
-    def audio_stream_socket(ws):
-        """
-        WebSocket handler for audio streaming.
-        
-        This replaces the PyAudio approach to enable audio streaming in serverless environments.
-        The client sends audio data to this WebSocket, which is then processed and sent to Gemini.
-        Response audio data is sent back through the same WebSocket connection.
-        
-        Args:
-            ws: WebSocket connection object
-        """
-        global audio_loop
-        global ws_clients
-        
-        logger.info("New WebSocket client connected for audio streaming")
-        
-        # Add the WebSocket to our clients set
-        ws_clients.add(ws)
-        
-        try:
-            # Check if we have an active audio loop
-            if not audio_loop or not audio_loop.is_running:
-                logger.warning("Client connected but no active audio session. Starting one.")
-                
-                # Start an audio session if none exists
-                if not audio_loop:
-                    from api.app import create_audio_loop
-                    audio_loop = create_audio_loop()
-                    
-                    # Start the audio loop in a new thread
-                    audio_thread = Thread(
-                        target=lambda: run_async_task(audio_loop.run, current_app.config['GEMINI_CONFIG']),
-                        daemon=True
-                    )
-                    audio_thread.start()
-            
-            # Process WebSocket messages as long as the connection is open
-            while True:
-                # Wait for a message from the client
-                message = ws.receive()
-                
-                # Process received message
-                if message:
-                    try:
-                        # Try to parse as JSON first
-                        data = json.loads(message)
-                        
-                        # Handle different message types
-                        if data.get("type") == "audio":
-                            # Decode base64 audio data
-                            audio_bytes = base64.b64decode(data["data"])
-                            
-                            # If the audio loop is running, send the audio data to it
-                            if audio_loop and audio_loop.is_running:
-                                # Put this in the out_queue to be processed by the audio loop
-                                asyncio.run(audio_loop.out_queue.put({
-                                    "data": audio_bytes,
-                                    "mime_type": data.get("format", "audio/pcm")
-                                }))
-                        
-                        elif data.get("type") == "control":
-                            # Handle control messages (start, stop, etc.)
-                            if data.get("command") == "stop":
-                                logger.info("Client requested audio session stop")
-                                if audio_loop:
-                                    asyncio.run(audio_loop.stop())
-                            elif data.get("command") == "start":
-                                logger.info("Client requested audio session start")
-                                # Audio session is started when the WebSocket is connected
-                                
-                    except json.JSONDecodeError:
-                        # If not JSON, treat as raw audio data
-                        if audio_loop and audio_loop.is_running:
-                            asyncio.run(audio_loop.out_queue.put({
-                                "data": message,
-                                "mime_type": "audio/pcm"  # Assume default format
-                            }))
-                
-        except Exception as e:
-            logger.error(f"WebSocket error: {str(e)}")
-        finally:
-            # Remove the WebSocket from the clients set when the connection closes
-            if ws in ws_clients:
-                ws_clients.remove(ws)
-            logger.info("WebSocket client disconnected")
-    
     @app.route('/start_voice', methods=['POST', 'OPTIONS'])
     def start_voice():
         """Start voice interaction with Gemini AI."""
         global audio_loop
         global audio_thread
+        
+        # If in Vercel, return a simplified response since we can't run the audio loop
+        if IN_VERCEL:
+            return jsonify({
+                "status": "started",
+                "vercel": True,
+                "info": "Limited functionality in serverless environment. WebSocket connections are not supported."
+            })
         
         with session_lock:
             # If there's an existing session, terminate it first
@@ -599,6 +607,10 @@ def register_routes(app):
         global audio_thread
         global ws_clients
         
+        # If in Vercel, return a simplified response
+        if IN_VERCEL:
+            return jsonify({"status": "terminated", "vercel": True})
+        
         with session_lock:
             if audio_loop:
                 try:
@@ -632,5 +644,16 @@ def register_routes(app):
         """Get transcription from Gemini AI (currently disabled)."""
         # Disabled transcription endpoint
         return jsonify({"transcription": None})
+        
+    # Add a status endpoint that's safe to call in Vercel
+    @app.route('/status')
+    def status():
+        """Get the status of the API."""
+        return jsonify({
+            "status": "ok",
+            "vercel": IN_VERCEL,
+            "version": "1.0.0",
+            "environment": "vercel" if IN_VERCEL else "standard"
+        })
         
     return app
