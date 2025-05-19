@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gem Voice API Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .button-container {
+            margin: 20px 0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        button.recording {
+            background-color: #f44336;
+            animation: pulse 1.5s infinite;
+        }
+        button.stop {
+            background-color: #f44336;
+        }
+        button.listening {
+            background-color: #2196F3;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+        .response-container {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #f9f9f9;
+            min-height: 100px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .log-entry {
+            margin-bottom: 10px;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .success {
+            color: green;
+        }
+        .error {
+            color: red;
+        }
+        .info {
+            color: #2196F3;
+        }
+        .audio-controls {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #f0f9ff;
+        }
+        .visualizer {
+            height: 60px;
+            width: 100%;
+            margin: 10px 0;
+            background-color: #000;
+            border-radius: 4px;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            background-color: #ccc;
+        }
+        .status-indicator.connected {
+            background-color: #4CAF50;
+        }
+        .status-indicator.disconnected {
+            background-color: #f44336;
+        }
+        .status-indicator.connecting {
+            background-color: #FFC107;
+            animation: blink 1s infinite;
+        }
+        @keyframes blink {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+        .connection-status {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .settings {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #f5f5f5;
+        }
+        .setting-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Gem Voice API Test Environment</h1>
+    <p>Use the controls below to test the Gem Voice API WebSocket implementation.</p>
+    
+    <div class="settings">
+        <h3>Connection Settings</h3>
+        <div class="setting-row">
+            <label for="apiBaseUrl">API Base URL:</label>
+            <input type="text" id="apiBaseUrl" value="http://127.0.0.1:5000" style="width: 300px;">
+        </div>
+        <div class="setting-row">
+            <label for="wsProtocol">WebSocket Protocol:</label>
+            <select id="wsProtocol">
+                <option value="ws">ws:// (insecure)</option>
+                <option value="wss">wss:// (secure)</option>
+            </select>
+        </div>
+        <div class="setting-row">
+            <small>If running on localhost, use ws://. For deployed environments, use wss://</small>
+        </div>
+    </div>
+    
+    <div class="connection-status">
+        <div id="connectionIndicator" class="status-indicator disconnected"></div>
+        <span id="connectionStatus">Disconnected</span>
+    </div>
+    
+    <div class="button-container">
+        <button id="startVoiceBtn">Start Voice Session</button>
+        <button id="toggleMicBtn" disabled>Start Microphone</button>
+        <button id="terminateVoiceBtn" disabled>Terminate Voice Session</button>
+        <button id="clearLogBtn">Clear Log</button>
+    </div>
+    
+    <div class="audio-controls">
+        <h3>Audio Controls</h3>
+        <canvas id="visualizer" class="visualizer"></canvas>
+        <div>
+            <label for="volumeInput">Playback Volume:</label>
+            <input type="range" id="volumeInput" min="0" max="1" step="0.1" value="0.7">
+        </div>
+    </div>
+    
+    <h2>Event Log:</h2>
+    <div id="responseLog" class="response-container"></div>
+    
+    <script>
+        // DOM elements
+        const apiBaseUrlInput = document.getElementById('apiBaseUrl');
+        const wsProtocolSelect = document.getElementById('wsProtocol');
+        const startVoiceBtn = document.getElementById('startVoiceBtn');
+        const toggleMicBtn = document.getElementById('toggleMicBtn');
+        const terminateVoiceBtn = document.getElementById('terminateVoiceBtn');
+        const clearLogBtn = document.getElementById('clearLogBtn');
+        const responseLog = document.getElementById('responseLog');
+        const visualizer = document.getElementById('visualizer');
+        const volumeInput = document.getElementById('volumeInput');
+        const connectionIndicator = document.getElementById('connectionIndicator');
+        const connectionStatus = document.getElementById('connectionStatus');
+        
+        // Audio context and processing variables
+        let audioContext;
+        let audioStream;
+        let audioProcessor;
+        let analyser;
+        let isRecording = false;
+        let wsConnection = null;
+        let wsUrl = null;
+        let audioQueue = [];
+        let isProcessingAudio = false;
+        
+        // Function to add log entries to the response container
+        function addLogEntry(message, type = 'success') {
+            const logEntry = document.createElement('div');
+            logEntry.className = `log-entry ${type}`;
+            logEntry.innerHTML = `
+                <strong>${new Date().toLocaleTimeString()}</strong>: ${message}
+            `;
+            responseLog.prepend(logEntry);
+        }
+        
+        // Function to make API requests
+        async function callApi(endpoint, method = 'POST') {
+            const apiUrl = apiBaseUrlInput.value;
+            addLogEntry(`Sending ${method} request to ${endpoint}...`, 'info');
+            
+            try {
+                const response = await fetch(`${apiUrl}${endpoint}`, {
+                    method: method,
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                // Display response
+                addLogEntry(`Response: ${JSON.stringify(data, null, 2)}`);
+                return data;
+            } catch (error) {
+                addLogEntry(`Error: ${error.message}`, 'error');
+                console.error('API request failed:', error);
+                return null;
+            }
+        }
+        
+        // Function to draw audio visualization
+        function drawVisualizer(analyser, canvas) {
+            const canvasContext = canvas.getContext('2d');
+            const WIDTH = canvas.width;
+            const HEIGHT = canvas.height;
+            
+            analyser.fftSize = 256;
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            
+            canvasContext.clearRect(0, 0, WIDTH, HEIGHT);
+            
+            function draw() {
+                if (!isRecording) return;
+                
+                requestAnimationFrame(draw);
+                
+                analyser.getByteFrequencyData(dataArray);
+                
+                canvasContext.fillStyle = 'rgb(0, 0, 0)';
+                canvasContext.fillRect(0, 0, WIDTH, HEIGHT);
+                
+                const barWidth = (WIDTH / bufferLength) * 2.5;
+                let barHeight;
+                let x = 0;
+                
+                for(let i = 0; i < bufferLength; i++) {
+                    barHeight = dataArray[i] / 2;
+                    
+                    canvasContext.fillStyle = `rgb(50, ${barHeight + 100}, 50)`;
+                    canvasContext.fillRect(x, HEIGHT - barHeight, barWidth, barHeight);
+                    
+                    x += barWidth + 1;
+                }
+            }
+            
+            draw();
+        }
+        
+        // Initialize WebSocket connection
+        function initWebSocket(url) {
+            if (wsConnection) {
+                wsConnection.close();
+            }
+            
+            updateConnectionStatus('connecting');
+            
+            // Create WebSocket connection
+            wsConnection = new WebSocket(url);
+            
+            wsConnection.onopen = function(event) {
+                addLogEntry(`WebSocket connection established: ${url}`, 'success');
+                updateConnectionStatus('connected');
+                terminateVoiceBtn.disabled = false;
+                toggleMicBtn.disabled = false;
+            };
+            
+            wsConnection.onclose = function(event) {
+                addLogEntry(`WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'No reason provided'}`, 'info');
+                updateConnectionStatus('disconnected');
+                terminateVoiceBtn.disabled = true;
+                toggleMicBtn.disabled = true;
+                stopRecording();
+            };
+            
+            wsConnection.onerror = function(error) {
+                addLogEntry(`WebSocket error: ${error.message || 'Unknown error'}`, 'error');
+                updateConnectionStatus('disconnected');
+            };
+            
+            // Handle incoming WebSocket messages
+            wsConnection.onmessage = function(event) {
+                try {
+                    const message = JSON.parse(event.data);
+                    
+                    if (message.type === 'audio') {
+                        addLogEntry(`Received audio data from server`, 'info');
+                        playAudioFromBase64(message.data);
+                    } else if (message.type === 'ping') {
+                        // Just a keepalive ping, don't need to display it
+                        console.log('Received ping from server');
+                    } else {
+                        addLogEntry(`Received message: ${JSON.stringify(message)}`, 'info');
+                    }
+                } catch (error) {
+                    // If message is not JSON, assume it's raw audio data
+                    addLogEntry(`Received non-JSON message from server`, 'info');
+                    if (event.data instanceof Blob) {
+                        playAudioFromBlob(event.data);
+                    }
+                }
+            };
+            
+            return wsConnection;
+        }
+        
+        // Function to update connection status UI
+        function updateConnectionStatus(status) {
+            connectionIndicator.className = 'status-indicator ' + status;
+            
+            if (status === 'connected') {
+                connectionStatus.textContent = 'Connected';
+            } else if (status === 'disconnected') {
+                connectionStatus.textContent = 'Disconnected';
+            } else if (status === 'connecting') {
+                connectionStatus.textContent = 'Connecting...';
+            }
+        }
+        
+        // Function to start recording audio
+        async function startRecording() {
+            if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+                addLogEntry('Cannot start recording: WebSocket is not connected', 'error');
+                return;
+            }
+            
+            try {
+                // Initialize audio context if needed
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 16000  // Match the expected sample rate in the backend
+                    });
+                }
+                
+                // Get user media (microphone)
+                audioStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        channelCount: 1,
+                        sampleRate: 16000
+                    }
+                });
+                
+                // Create audio source from the microphone stream
+                const source = audioContext.createMediaStreamSource(audioStream);
+                
+                // Create analyser for visualization
+                analyser = audioContext.createAnalyser();
+                source.connect(analyser);
+                
+                // Set up audio processor for sending data to server
+                const processorBufferSize = 1024;
+                
+                if (audioContext.createScriptProcessor) {
+                    // Older API
+                    audioProcessor = audioContext.createScriptProcessor(processorBufferSize, 1, 1);
+                    
+                    audioProcessor.onaudioprocess = function(event) {
+                        if (!isRecording) return;
+                        
+                        const inputData = event.inputBuffer.getChannelData(0);
+                        
+                        // Convert Float32Array to Int16Array for PCM audio
+                        const pcmData = convertFloat32ToInt16(inputData);
+                        
+                        if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+                            // Send audio in base64 format
+                            const base64Data = arrayBufferToBase64(pcmData.buffer);
+                            
+                            wsConnection.send(JSON.stringify({
+                                type: 'audio',
+                                format: 'audio/pcm',
+                                data: base64Data
+                            }));
+                        }
+                    };
+                    
+                    source.connect(audioProcessor);
+                    audioProcessor.connect(audioContext.destination);
+                } else {
+                    // Modern AudioWorklet API
+                    addLogEntry('Your browser supports AudioWorklet API, but this test is using the older Script Processor.', 'info');
+                    // Implementation would go here if needed
+                }
+                
+                isRecording = true;
+                toggleMicBtn.textContent = 'Stop Microphone';
+                toggleMicBtn.classList.add('recording');
+                
+                // Start visualizer
+                drawVisualizer(analyser, visualizer);
+                
+                addLogEntry('Microphone recording started', 'success');
+            } catch (error) {
+                addLogEntry(`Error starting microphone: ${error.message}`, 'error');
+                console.error('Error accessing microphone:', error);
+            }
+        }
+        
+        // Function to stop recording
+        function stopRecording() {
+            if (!isRecording) return;
+            
+            isRecording = false;
+            
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+                audioStream = null;
+            }
+            
+            if (audioProcessor) {
+                audioProcessor.disconnect();
+                audioProcessor = null;
+            }
+            
+            toggleMicBtn.textContent = 'Start Microphone';
+            toggleMicBtn.classList.remove('recording');
+            
+            addLogEntry('Microphone recording stopped', 'info');
+        }
+        
+        // Helper function to convert Float32 array to Int16 array (for PCM audio)
+        function convertFloat32ToInt16(float32Array) {
+            const int16Array = new Int16Array(float32Array.length);
+            for (let i = 0; i < float32Array.length; i++) {
+                // Convert from [-1, 1] to [-32768, 32767]
+                int16Array[i] = float32Array[i] < 0 
+                    ? float32Array[i] * 0x8000 
+                    : float32Array[i] * 0x7FFF;
+            }
+            return int16Array;
+        }
+        
+        // Helper function to convert ArrayBuffer to base64
+        function arrayBufferToBase64(buffer) {
+            const bytes = new Uint8Array(buffer);
+            let binary = '';
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return window.btoa(binary);
+        }
+        
+        // Function to play audio from base64 string
+        async function playAudioFromBase64(base64Data) {
+            try {
+                // Convert base64 to array buffer
+                const binaryString = window.atob(base64Data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                
+                // WAV data should now have a proper header and be directly decodable
+                await playAudioData(bytes.buffer);
+            } catch (error) {
+                addLogEntry(`Error playing audio: ${error.message}`, 'error');
+                console.error('Error playing audio:', error);
+            }
+        }
+        
+        // Function to play audio from blob
+        async function playAudioFromBlob(blob) {
+            try {
+                const arrayBuffer = await blob.arrayBuffer();
+                await playAudioData(arrayBuffer);
+            } catch (error) {
+                addLogEntry(`Error playing audio blob: ${error.message}`, 'error');
+                console.error('Error playing audio blob:', error);
+            }
+        }
+        
+        // Function to play audio data
+        async function playAudioData(audioData) {
+            try {
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                
+                // Add to queue and process
+                audioQueue.push(audioData);
+                processAudioQueue();
+            } catch (error) {
+                addLogEntry(`Error in playAudioData: ${error.message}`, 'error');
+                console.error('Error in playAudioData:', error);
+            }
+        }
+        
+        // Process audio queue to play sequentially
+        async function processAudioQueue() {
+            if (isProcessingAudio || audioQueue.length === 0) return;
+            
+            isProcessingAudio = true;
+            
+            try {
+                while (audioQueue.length > 0) {
+                    const audioData = audioQueue.shift();
+                    
+                    // Make sure audio context is running
+                    if (!audioContext) {
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    }
+                    
+                    if (audioContext.state === 'suspended') {
+                        await audioContext.resume();
+                    }
+                    
+                    // Use a try/catch block for each audio buffer to prevent one failure from stopping all playback
+                    try {
+                        // Decode audio data
+                        const audioBuffer = await audioContext.decodeAudioData(audioData);
+                        
+                        // Create source node
+                        const source = audioContext.createBufferSource();
+                        source.buffer = audioBuffer;
+                        
+                        // Create gain node for volume control
+                        const gainNode = audioContext.createGain();
+                        gainNode.gain.value = parseFloat(volumeInput.value);
+                        
+                        // Connect nodes
+                        source.connect(gainNode);
+                        gainNode.connect(audioContext.destination);
+                        
+                        // Play audio
+                        source.start();
+                        
+                        // Wait for audio to finish playing
+                        await new Promise((resolve) => {
+                            source.onended = resolve;
+                            // Add a timeout as fallback in case onended doesn't fire
+                            setTimeout(resolve, (audioBuffer.duration * 1000) + 100);
+                        });
+                    } catch (error) {
+                        addLogEntry(`Error playing audio segment: ${error.message}`, 'error');
+                        console.error('Error playing audio segment:', error);
+                        // Continue with next audio segment
+                        continue;
+                    }
+                }
+            } catch (error) {
+                addLogEntry(`Error processing audio queue: ${error.message}`, 'error');
+                console.error('Error processing audio queue:', error);
+            } finally {
+                isProcessingAudio = false;
+                
+                // Process any new audio that may have arrived while we were processing
+                if (audioQueue.length > 0) {
+                    setTimeout(processAudioQueue, 0);
+                }
+            }
+        }
+        
+        // Event listeners
+        startVoiceBtn.addEventListener('click', async () => {
+            const response = await callApi('/start_voice');
+            
+            if (response && response.status === 'started') {
+                // Get WebSocket URL from response or build it
+                let wsUrl;
+                if (response.websocket && response.websocket.url) {
+                    wsUrl = response.websocket.url;
+                } else {
+                    const apiBase = apiBaseUrlInput.value.replace(/^http/, 'ws');
+                    wsUrl = `${apiBase}/audio-stream`;
+                }
+                
+                // Override protocol if user selected a specific one
+                if (wsProtocolSelect.value === 'ws') {
+                    wsUrl = wsUrl.replace('wss://', 'ws://');
+                } else if (wsProtocolSelect.value === 'wss') {
+                    wsUrl = wsUrl.replace('ws://', 'wss://');
+                }
+                
+                // Initialize WebSocket connection
+                initWebSocket(wsUrl);
+            }
+        });
+        
+        toggleMicBtn.addEventListener('click', () => {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        });
+        
+        terminateVoiceBtn.addEventListener('click', async () => {
+            stopRecording();
+            
+            if (wsConnection) {
+                wsConnection.close();
+                wsConnection = null;
+            }
+            
+            await callApi('/terminate_voice');
+            updateConnectionStatus('disconnected');
+            terminateVoiceBtn.disabled = true;
+            toggleMicBtn.disabled = true;
+        });
+        
+        clearLogBtn.addEventListener('click', () => {
+            responseLog.innerHTML = '';
+        });
+        
+        // Make sure audio context is started after user interaction
+        document.addEventListener('click', () => {
+            if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+        });
+        
+        // Initialize
+        addLogEntry('Test environment loaded. Use "Start Voice Session" to begin.', 'info');
+        
+        // Ensure visualizer canvas is properly sized
+        function resizeCanvas() {
+            visualizer.width = visualizer.clientWidth;
+            visualizer.height = visualizer.clientHeight;
+        }
+        
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+    </script>
+</body>
+</html>

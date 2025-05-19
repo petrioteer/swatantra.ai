@@ -1,123 +1,170 @@
 # Gem Voice API
 
-A voice interface to interact with Gemini AI using Flask, deployed on Vercel.
+A streamlined API for real-time voice interaction with Google's Gemini AI, built with Flask and WebSockets.
 
-## Project Structure
+## Overview
 
-```
-gem-voice-API/
-│
-├── api/                  # Main API package
-│   ├── __init__.py
-│   ├── app.py            # Flask application creation
-│   ├── api/              # API routes
-│   │   ├── __init__.py
-│   │   └── routes.py     # API endpoints
-│   ├── audio/            # Audio processing
-│   │   ├── __init__.py
-│   │   └── processor.py  # Audio processing logic
-│   └── config/           # Configuration
-│       ├── __init__.py
-│       ├── gemini_config.py  # Gemini API configuration
-│       └── settings.py   # General settings
-│
-├── index.py              # Entry point for Vercel
-├── vercel.json           # Vercel configuration
-├── requirements.txt      # Python dependencies
-├── build_files.sh        # Build script for Vercel
-└── .env                  # Environment variables
-```
+Gem Voice API provides a simple interface to enable voice conversations with Google's Gemini AI models. It handles real-time audio streaming through WebSockets, allowing for natural voice interaction with Dr. Swatantra AI, a virtual wellness guide.
 
-## Local Development
+## Key Features
 
-1. Create a virtual environment and activate it:
-
-```
-python -m venv venv
-source venv/bin/activate  # On Windows, use: venv\Scripts\activate
-```
-
-2. Install dependencies:
-
-```
-pip install -r requirements.txt
-```
-
-3. Run the application:
-
-```
-python index.py
-```
-
-4. The API will be available at `http://localhost:5000`.
+- **Real-time Voice Conversations**: Two-way voice communication with Gemini AI
+- **WebSocket Audio Streaming**: Low-latency audio transmission
+- **WAV Audio Format**: High-quality audio responses
+- **Flask-based REST API**: Simple endpoints for session management
+- **Cross-Origin Support**: Works with web clients from any domain
+- **Customized AI Persona**: Configured as Dr. Swatantra AI, a wellness guide
 
 ## API Endpoints
 
-- `POST /start_voice`: Start voice interaction with Gemini AI
-- `POST /terminate_voice`: Stop voice interaction with Gemini AI
+- **Home**: `GET /` - Documentation page with API information
+- **Start Voice**: `POST /start_voice` - Initiates a voice session and returns WebSocket connection details
+- **Terminate Voice**: `POST /terminate_voice` - Ends an active voice session
+- **Status**: `GET /status` - Returns API status information
+- **WebSocket**: `WS /audio-stream` - WebSocket endpoint for audio streaming
 
-## Deploying to Vercel
+## WebSocket Protocol
 
-1. Install the Vercel CLI:
+The WebSocket connection supports the following message types:
 
-```
-npm install -g vercel
-```
+### Client to Server
 
-2. Login to Vercel:
-
-```
-vercel login
-```
-
-3. Deploy the project:
-
-```
-vercel
+```json
+{
+  "type": "audio",
+  "format": "audio/pcm",
+  "data": "<base64-encoded audio data>"
+}
 ```
 
-4. Set environment variables in Vercel dashboard:
-   - `GEMINI_API_KEY`: Your Gemini API key
+### Server to Client
 
-5. For production deployment:
-
+```json
+{
+  "type": "audio",
+  "format": "audio/wav",
+  "data": "<base64-encoded WAV audio>"
+}
 ```
-vercel --prod
+
+## Requirements
+
+- Python 3.8+
+- Flask and Flask-CORS
+- Flask-Sock for WebSocket support
+- Google Generative AI Python SDK
+- Valid Google Gemini API key
+
+## Installation
+
+1. Clone the repository:
+
+   ```
+   git clone <repository-url>
+   cd gem-voice-API
+   ```
+
+2. Create a virtual environment and activate it:
+
+   ```
+   python -m venv test
+   # On Windows
+   test\Scripts\activate
+   # On macOS/Linux
+   source test/bin/activate
+   ```
+
+3. Install dependencies:
+
+   ```
+   pip install -r requirements.txt
+   ```
+
+4. Set up your Gemini API key:
+
+   ```
+   # Windows
+   set GEMINI_API_KEY=your_api_key_here
+   
+   # macOS/Linux
+   export GEMINI_API_KEY=your_api_key_here
+   ```
+
+## Usage
+
+1. Start the server:
+
+   ```
+   python app.py
+   ```
+
+2. The API will be available at `http://localhost:5000`
+
+3. To start a voice conversation:
+   - Send a POST request to `/start_voice`
+   - Connect to the returned WebSocket URL
+   - Send audio data through the WebSocket
+   - Receive audio responses through the same WebSocket
+
+4. To end a conversation:
+   - Send a POST request to `/terminate_voice`
+
+## Serverless Deployment Notes
+
+When deployed to serverless environments like Vercel, this API has the following limitations:
+
+1. **Execution Time Limits**: Serverless functions typically have a 10-second execution timeout, which limits continuous WebSocket connections.
+
+2. **WebSocket Support**: While the API can establish WebSocket connections in serverless environments, they may be closed after the timeout period.
+
+3. **Recommended Deployment**: For production use with continuous voice interaction, deploy to a platform that supports persistent connections (traditional server, container service, etc.).
+
+## Configuration
+
+Key configuration settings in the API:
+
+- **Audio Format**: 16-bit PCM mono audio
+- **Input Sample Rate**: 16kHz
+- **Output Sample Rate**: 24kHz
+- **AI Model**: Gemini-2.0-flash-live-001
+- **Connection Timeout**: 30 seconds
+- **Voice**: Puck (configurable)
+
+## Example Client Implementation
+
+A simple client implementation using JavaScript:
+
+```html
+<script>
+  // Start a voice session
+  async function startVoiceSession() {
+    const response = await fetch('/start_voice', { method: 'POST' });
+    const data = await response.json();
+    
+    // Connect to WebSocket
+    const ws = new WebSocket(data.websocket.url);
+    
+    ws.onopen = () => {
+      // Start capturing audio from microphone and sending it
+      // Implementation depends on browser APIs
+    };
+    
+    ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === 'audio') {
+        // Play the received audio
+        const audio = new Audio('data:audio/wav;base64,' + message.data);
+        audio.play();
+      }
+    };
+  }
+  
+  // End a voice session
+  async function endVoiceSession() {
+    await fetch('/terminate_voice', { method: 'POST' });
+  }
+</script>
 ```
-
-## Notes for Vercel Deployment
-
-- This API runs on serverless functions on Vercel
-- Audio streaming features are disabled in serverless environments
-- The API can still serve as a backend for web applications that handle audio on the client side
-
-## Deployment Notes
-
-### Vercel Serverless Environment Limitations
-
-When deployed on Vercel, this API operates in a serverless environment with the following limitations:
-
-1. **Audio Hardware Access:** Serverless functions cannot access local audio hardware (microphones/speakers), making real-time audio streaming impossible.
-
-2. **PyAudio Dependency:** The PyAudio library used for audio capture and playback is intentionally not loaded in the Vercel environment.
-
-3. **Connection Duration:** Serverless functions have execution time limits (typically 10-60 seconds), making long-running audio streams impractical.
-
-4. **Audio Processing Behavior:** The API automatically detects when running in a serverless environment (`os.environ.get('VERCEL') == '1'`) and disables local audio capture/playback functionality.
-
-### Production Implementation Recommendations
-
-For production applications requiring voice interaction with Gemini AI, we recommend:
-
-1. **Client-side Audio Capture:** Implement audio recording in the client application (web, mobile, or desktop).
-
-2. **Audio Processing:** Process audio on the client side to the required format (PCM, MP3, etc.).
-
-3. **API Integration:** Send the processed audio data to the API endpoints as complete files or chunks.
-
-4. **Alternative Architectures:** For continuous real-time audio streaming applications, consider deploying this API on a traditional server environment that supports persistent connections and audio hardware access.
-
-The API will continue to function on Vercel, but with the audio streaming capabilities limited to processing pre-recorded audio files sent through HTTP requests rather than real-time streaming from local hardware.
 
 ## License
 

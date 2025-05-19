@@ -1,18 +1,5 @@
-flask>=2.0.0
-flask-cors>=3.0.10
-google-generativeai>=0.3.0
-google>=3.0.0
-google.genai
-google-api-python-client>=2.0.0
-# pyaudio is removed as we're using WebSockets instead
-gunicorn>=20.1.0
-python-dotenv>=0.19.0
-# WebSocket support
-flask-sock>=0.5.2
-websockets>=10.4
-# Audio processing
-pydub>=0.25.1
-# For async support - use a version that works with Python 3.7+
-asyncio>=3.4.3
-# Add uvicorn for better async support in production
-uvicorn>=0.17.0
+flask==3.1.1
+flask-cors==6.0.0
+flask-sock==0.7.0
+google==3.0.0
+google.genai==1.15.0
