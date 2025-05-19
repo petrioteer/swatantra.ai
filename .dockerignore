@@ -1,0 +1,30 @@
+# Virtual environment
+test/
+
+# Git and version control
+.git/
+.gitignore
+.gitattributes
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+
+# Local files
+.env.local
+.env.development.local
+.env
+*.log
+
+# Editor directories and files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Fly.io specific
+.fly/
